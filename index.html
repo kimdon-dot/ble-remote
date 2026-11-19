@@ -1,245 +1,37 @@
 <!DOCTYPE html>
-<html lang="ko">
+<html>
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>라즈베리파이 BLE 리모컨</title>
-<style>
-  :root {
-    --bg: #f6f4f1; --card: #ffffff; --text: #1f1d1a; --muted: #6f6a63;
-    --accent: #c2185b; --accent-soft: #fbe3ec; --ok: #2e7d32; --err: #c62828;
-    --line: #e6e1da;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #161514; --card: #211f1d; --text: #f1eeea; --muted: #a39d95;
-      --accent: #f06292; --accent-soft: #3a2230; --ok: #81c784; --err: #ef9a9a;
-      --line: #34312d;
-    }
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif;
-    display: flex; justify-content: center; padding: 24px 16px;
-  }
-  main { width: 100%; max-width: 420px; display: flex; flex-direction: column; gap: 16px; }
-  h1 { font-size: 22px; margin: 4px 0 0; }
-  .sub { color: var(--muted); font-size: 14px; margin: 0; }
-  .card {
-    background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px;
-  }
-  .status { display: flex; align-items: center; gap: 12px; }
-  .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--muted); flex: none; }
-  .dot.ok { background: var(--ok); }
-  .dot.busy { background: var(--accent); animation: pulse 1s infinite; }
-  .dot.err { background: var(--err); }
-  @keyframes pulse { 50% { opacity: .3; } }
-  #statusText { font-size: 15px; line-height: 1.4; }
-  button {
-    width: 100%; border: 0; border-radius: 14px; padding: 16px; font-size: 17px; font-weight: 600;
-    cursor: pointer; font-family: inherit; transition: transform .05s, opacity .2s;
-  }
-  button:active { transform: scale(.98); }
-  button:disabled { opacity: .4; cursor: not-allowed; }
-  .primary { background: var(--accent); color: #fff; }
-  .secondary { background: var(--accent-soft); color: var(--accent); }
-  label { display: block; font-size: 14px; color: var(--muted); margin-bottom: 8px; }
-  input {
-    width: 100%; font-size: 24px; padding: 12px 14px; border-radius: 12px; font-family: inherit;
-    border: 1px solid var(--line); background: var(--bg); color: var(--text); margin-bottom: 12px;
-  }
-  input:focus { outline: 2px solid var(--accent); border-color: transparent; }
-  .log { font-size: 13px; color: var(--muted); max-height: 160px; overflow-y: auto; margin: 0; padding-left: 18px; }
-  .log li { margin: 2px 0; }
-  .warn {
-    display: none; background: var(--accent-soft); color: var(--text); border-radius: 12px;
-    padding: 14px; font-size: 14px; line-height: 1.5;
-  }
-  .warn b { color: var(--accent); }
-</style>
+<meta name="viewport" content="width=device-width">
+<title>RC</title>
+<style>button{touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}</style>
 </head>
 <body>
-<main>
-  <div>
-    <h1>BLE 리모컨</h1>
-    <p class="sub">라즈베리파이 · ESP32 · HM-10(STM32)에 숫자를 보냅니다</p>
-  </div>
-
-  <div id="warn" class="warn"></div>
-
-  <div class="card status">
-    <div id="dot" class="dot"></div>
-    <div id="statusText">연결 안 됨</div>
-  </div>
-
-  <!-- 버튼 1: 블루투스 연결 -->
-  <button id="connectBtn" class="primary">블루투스 연결</button>
-
-  <div class="card">
-    <label for="numberInput">보낼 숫자</label>
-    <input id="numberInput" type="text" inputmode="decimal" value="42" autocomplete="off">
-    <!-- 버튼 2: 숫자 전송 -->
-    <button id="sendBtn" class="secondary" disabled>숫자 전송</button>
-  </div>
-
-  <div class="card">
-    <label>기록</label>
-    <ul id="log" class="log"></ul>
-  </div>
-</main>
-
+<button id="connect">연결</button>
+<button id="accel">가속</button>
+<button id="brake">브레이크</button>
+<button id="reverse">후진</button>
+<p id="val">0</p>
 <script>
-  // 지원하는 장치 종류. 장치 쪽 코드의 UUID와 반드시 같아야 합니다.
-  const PROFILES = [
-    { // 라즈베리파이 ble_server.py, ESP32 스케치
-      label: "라즈베리파이 / ESP32",
-      service: "12345678-1234-5678-1234-56789abcdef0",
-      char:    "12345678-1234-5678-1234-56789abcdef1",
-    },
-    { // HM-10 및 호환 모듈(AT-09, BT05, CC41 등) → STM32 등에 UART로 연결
-      label: "HM-10 모듈",
-      service: "0000ffe0-0000-1000-8000-00805f9b34fb",
-      char:    "0000ffe1-0000-1000-8000-00805f9b34fb",
-    },
-  ];
-  // 서비스 UUID를 광고하지 않는 모듈도 이름으로 찾을 수 있게
-  const NAME_PREFIXES = ["RaspberryPi", "ESP32", "HMSoft", "BT05", "HM-10", "MLT-BT05", "JDY"];
+let ch, q = Promise.resolve();
 
-  const $ = (id) => document.getElementById(id);
-  const connectBtn = $("connectBtn"), sendBtn = $("sendBtn"), input = $("numberInput");
+connect.onclick = async () => {
+  const dev = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [0xffe0] });
+  const server = await dev.gatt.connect();
+  ch = await (await server.getPrimaryService(0xffe0)).getCharacteristic(0xffe1);
+  connect.textContent = "연결됨";
+};
 
-  let device = null;
-  let numberChar = null;
+function send(v) {
+  val.textContent = v;
+  q = q.then(() => ch.writeValueWithoutResponse(new TextEncoder().encode(v + "\n")));
+}
 
-  function setStatus(text, state = "") {
-    $("statusText").textContent = text;
-    $("dot").className = "dot " + state;
-  }
-
-  function log(text) {
-    const li = document.createElement("li");
-    li.textContent = new Date().toLocaleTimeString() + "  " + text;
-    $("log").prepend(li);
-  }
-
-  function updateButtons() {
-    const connected = !!numberChar;
-    connectBtn.textContent = connected ? "연결 끊기" : "블루투스 연결";
-    sendBtn.disabled = !connected;
-  }
-
-  // 이 브라우저에서 웹 블루투스를 쓸 수 있는지 확인
-  function checkSupport() {
-    if (navigator.bluetooth) return true;
-    const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
-    const w = $("warn");
-    w.style.display = "block";
-    if (!window.isSecureContext) {
-      w.innerHTML = "이 페이지는 <b>https://</b> 주소로 열어야 블루투스가 동작합니다.";
-    } else if (isIOS) {
-      w.innerHTML = "아이폰 사파리·크롬은 웹 블루투스를 지원하지 않습니다.<br>" +
-                    "App Store에서 <b>Bluefy</b> 앱을 설치한 뒤 Bluefy로 이 주소를 열어 주세요.";
-    } else {
-      w.innerHTML = "이 브라우저는 웹 블루투스를 지원하지 않습니다.<br>안드로이드는 <b>Chrome</b>으로 열어 주세요.";
-    }
-    connectBtn.disabled = true;
-    return false;
-  }
-
-  // ───────── 버튼 1: 블루투스 연결 / 끊기 ─────────
-  connectBtn.addEventListener("click", async () => {
-    if (numberChar) {               // 이미 연결됨 → 끊기
-      device?.gatt?.disconnect();
-      return;
-    }
-    try {
-      connectBtn.disabled = true;
-      setStatus("목록에서 연결할 장치를 선택하세요", "busy");
-
-      device = await navigator.bluetooth.requestDevice({
-        filters: [
-          ...PROFILES.map((p) => ({ services: [p.service] })),
-          ...NAME_PREFIXES.map((n) => ({ namePrefix: n })),
-        ],
-        optionalServices: PROFILES.map((p) => p.service),
-      });
-      device.addEventListener("gattserverdisconnected", onDisconnected);
-
-      setStatus("연결 중...", "busy");
-      const server = await device.gatt.connect();
-
-      // 장치가 어떤 종류인지 서비스로 판별
-      let profile = null;
-      for (const p of PROFILES) {
-        try {
-          const service = await server.getPrimaryService(p.service);
-          numberChar = await service.getCharacteristic(p.char);
-          profile = p;
-          break;
-        } catch (e) { /* 이 종류가 아님 → 다음 */ }
-      }
-      if (!profile) {
-        device.gatt.disconnect();
-        throw new Error("지원하지 않는 장치입니다 (UUID 확인)");
-      }
-
-      setStatus("연결됨 ✅  " + (device.name || "") + " · " + profile.label, "ok");
-      log("연결됨: " + profile.label);
-    } catch (e) {
-      numberChar = null;
-      if (e.name === "NotFoundError") {
-        setStatus("선택이 취소되었거나 라즈베리파이를 찾지 못했습니다", "err");
-      } else {
-        setStatus("오류: " + e.message, "err");
-      }
-    } finally {
-      connectBtn.disabled = false;
-      updateButtons();
-    }
-  });
-
-  function onDisconnected() {
-    numberChar = null;
-    setStatus("연결 끊김", "");
-    log("연결 끊김");
-    updateButtons();
-  }
-
-  // ───────── 버튼 2: 숫자 전송 ─────────
-  async function sendNumber() {
-    const text = input.value.trim();
-    if (text === "" || isNaN(Number(text))) {
-      setStatus("숫자를 입력하세요", "err");
-      return;
-    }
-    try {
-      sendBtn.disabled = true;
-      // 끝에 줄바꿈을 붙여서, UART로 받는 STM32가 숫자의 끝을 알 수 있게 함
-      const data = new TextEncoder().encode(text + "\n");
-      const props = numberChar.properties || {};
-      if (props.write && numberChar.writeValueWithResponse) {
-        await numberChar.writeValueWithResponse(data);
-      } else if (props.writeWithoutResponse && numberChar.writeValueWithoutResponse) {
-        await numberChar.writeValueWithoutResponse(data);   // HM-10
-      } else {
-        await numberChar.writeValue(data);
-      }
-      setStatus("전송 완료: " + text, "ok");
-      log("보냄 → " + text);
-    } catch (e) {
-      setStatus("전송 실패: " + e.message, "err");
-    } finally {
-      updateButtons();
-    }
-  }
-
-  sendBtn.addEventListener("click", sendNumber);
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !sendBtn.disabled) sendNumber();
-  });
-
-  checkSupport();
+// 누르고 있는 동안: 가속 1, 브레이크 2, 후진 3 / 떼면 0
+[[accel, 1], [brake, 2], [reverse, 3]].forEach(([b, v]) => {
+  b.onpointerdown = () => send(v);
+  b.onpointerup = b.onpointercancel = () => send(0);
+});
 </script>
 </body>
 </html>
