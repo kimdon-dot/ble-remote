@@ -13,21 +13,28 @@
 <button id="reverse">후진</button>
 <p id="val">0</p>
 <script>
-let ch, q = Promise.resolve();
+let writer, timer, q = Promise.resolve();
 
 connect.onclick = async () => {
-  const dev = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [0xffe0] });
-  const server = await dev.gatt.connect();
-  ch = await (await server.getPrimaryService(0xffe0)).getCharacteristic(0xffe1);
+  const port = await navigator.serial.requestPort();
+  await port.open({ baudRate: 9600 });
+  writer = port.writable.getWriter();
   connect.textContent = "연결됨";
 };
 
-function send(v) {
-  val.textContent = v;
-  q = q.then(() => ch.writeValueWithoutResponse(new TextEncoder().encode(v + "\n")));
+function write(v) {
+  q = q.then(() => writer.write(new TextEncoder().encode(v + "\n"))).catch(() => {});
 }
 
-// 누르고 있는 동안: 가속 1, 브레이크 2, 후진 3 / 떼면 0
+// 누르고 있는 동안 150ms마다 반복 전송 (STM32 페일세이프용)
+function send(v) {
+  val.textContent = v;
+  clearInterval(timer);
+  write(v);
+  if (v) timer = setInterval(() => write(v), 150);
+}
+
+// 가속 1, 브레이크 2, 후진 3 / 떼면 0
 [[accel, 1], [brake, 2], [reverse, 3]].forEach(([b, v]) => {
   b.onpointerdown = () => send(v);
   b.onpointerup = b.onpointercancel = () => send(0);
